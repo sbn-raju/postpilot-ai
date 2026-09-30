@@ -21,13 +21,16 @@ TONES = [
 LENGTHS = {"short": "Short (~100 words)", "medium": "Medium (~200 words)", "long": "Long (~350 words)"}
 STATUS_COLORS = {"pending": "orange", "generating": "blue", "completed": "green", "failed": "red"}
 HISTORY_LIMIT = 50
+# The agent pipeline makes several LLM calls; allow well beyond the backend's own timeout.
+GENERATE_TIMEOUT_SECONDS = 600
 
 st.set_page_config(page_title="PostPilot AI", page_icon="✈️")
 
 
 def api(method: str, path: str, token: str | None = None, **kwargs) -> requests.Response:
     headers = {"Authorization": f"Bearer {token}"} if token else {}
-    return requests.request(method, f"{API_URL}{path}", headers=headers, timeout=10, **kwargs)
+    kwargs.setdefault("timeout", 10)
+    return requests.request(method, f"{API_URL}{path}", headers=headers, **kwargs)
 
 
 def error_message(resp: requests.Response) -> str:
@@ -127,9 +130,67 @@ def new_post_form() -> None:
         if resp is None:
             return
         if resp.ok:
-            st.success("Post saved. Generation will be available soon.")
+            st.success("Post saved. Click ✨ Generate on it below to run the agents.")
         else:
             st.error(error_message(resp))
+
+
+def generate_post(post_id: int) -> None:
+    with st.spinner("🔎 Researching → ✍️ Drafting → 🧐 Critiquing → ✨ Revising..."):
+        try:
+            resp = api_or_logout(
+                "POST", f"/api/posts/{post_id}/generate", timeout=GENERATE_TIMEOUT_SECONDS
+            )
+        except requests.Timeout:
+            st.error("Generation is taking too long. Refresh in a minute to see the result.")
+            return
+    if resp is None:
+        return
+    if resp.ok:
+        st.session_state[f"show_{post_id}"] = True
+        st.rerun()
+    else:
+        st.error(error_message(resp))
+
+
+def show_latest_generation(post_id: int) -> None:
+    resp = api_or_logout("GET", f"/api/posts/{post_id}/generations", params={"limit": 1})
+    if resp is None:
+        return
+    if not resp.ok:
+        st.error(error_message(resp))
+        return
+    items = resp.json()["items"]
+    if not items:
+        st.caption("No generations yet.")
+        return
+    gen = items[0]
+
+    st.markdown("**📬 Final post**")
+    st.code(gen["final_post"], language=None, wrap_lines=True)  # has a copy button
+
+    critique = gen["critique"]
+    cols = st.columns(3)
+    cols[0].metric("Accuracy", f"{critique['accuracy_score']}/10")
+    cols[1].metric("Engagement", f"{critique['engagement_score']}/10")
+    cols[2].metric("Audience fit", f"{critique['audience_fit_score']}/10")
+
+    draft_tab, research_tab, critique_tab = st.tabs(["✍️ First draft", "🔎 Research", "🧐 Critique"])
+    with draft_tab:
+        st.text(gen["draft"])
+    with research_tab:
+        research = gen["research_output"]
+        st.write(research["summary"])
+        for title, key in [
+            ("Key facts", "key_facts"),
+            ("Angles", "angles"),
+            ("Audience insights", "audience_insights"),
+            ("Pitfalls", "pitfalls"),
+        ]:
+            st.markdown(f"**{title}**\n" + "\n".join(f"- {item}" for item in research[key]))
+    with critique_tab:
+        for title, key in [("Strengths", "strengths"), ("Issues", "issues"), ("Suggestions", "suggestions")]:
+            st.markdown(f"**{title}**\n" + "\n".join(f"- {item}" for item in critique[key]))
 
 
 def post_history() -> None:
@@ -161,6 +222,10 @@ def post_history() -> None:
                     f"{created:%b %d, %Y %H:%M}"
                 )
             with col_action:
+                if post["status"] != "generating" and st.button(
+                    "✨", key=f"generate_{post['id']}", help="Generate with the agents"
+                ):
+                    generate_post(post["id"])
                 if st.button("🗑️", key=f"delete_{post['id']}", help="Delete this post"):
                     del_resp = api_or_logout("DELETE", f"/api/posts/{post['id']}")
                     if del_resp is None:
@@ -169,6 +234,10 @@ def post_history() -> None:
                         st.rerun()
                     else:
                         st.error(error_message(del_resp))
+            if post["status"] == "completed" and st.toggle(
+                "Show result", key=f"show_{post['id']}"
+            ):
+                show_latest_generation(post["id"])
 
 
 def dashboard() -> None:

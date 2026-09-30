@@ -11,6 +11,7 @@
 ![Python](https://img.shields.io/badge/Python-3.12-3776AB?style=for-the-badge&logo=python&logoColor=white)
 ![FastAPI](https://img.shields.io/badge/FastAPI-009688?style=for-the-badge&logo=fastapi&logoColor=white)
 ![Streamlit](https://img.shields.io/badge/Streamlit-FF4B4B?style=for-the-badge&logo=streamlit&logoColor=white)
+![Claude](https://img.shields.io/badge/Claude_Agent_SDK-D97757?style=for-the-badge&logo=anthropic&logoColor=white)
 ![License](https://img.shields.io/badge/License-MIT-blue?style=for-the-badge)
 
 </div>
@@ -78,6 +79,7 @@ The critique-and-revise step is what makes PostPilot different. Instead of stopp
 - 🎨 **Tone control:** professional, casual, inspirational, technical, storytelling
 - 🧪 **Built-in quality gate:** every draft is critiqued for accuracy and engagement before it reaches you
 - 👀 **Transparent pipeline:** see the research brief, the first draft, and the critique, not just the final output
+- 🧠 **Powered by Claude:** every agent runs on Claude through the Claude Agent SDK
 - ⚡ **Lean stack:** FastAPI backend with a lightweight Streamlit UI, all in Python
 
 ---
@@ -100,21 +102,25 @@ The critique-and-revise step is what makes PostPilot different. Instead of stopp
 │        Prompt templates · Pydantic schemas · Config     │
 └───────────────────────────┬─────────────────────────────┘
                             │
-                     ┌──────▼──────┐
-                     │  LLM API    │
-                     └─────────────┘
+                  ┌─────────▼─────────┐
+                  │ Claude Agent SDK  │
+                  │   → Claude API    │
+                  └───────────────────┘
 ```
+
+Each agent is a `ClaudeAgent` ([backend/app/agents/base.py](backend/app/agents/base.py)): a system prompt built from the pipeline state, a short task message, and an optional Pydantic output schema. [backend/app/llm.py](backend/app/llm.py) runs each agent turn as a one-shot Claude Agent SDK `query()`, with Claude Code's built-in tools turned off (`tools=[]`) and local Claude Code settings ignored (`setting_sources=[]`). The Research and Critique agents use the SDK's JSON-schema `output_format`, so their replies come back as structured data and are validated with Pydantic. Transient API errors (429, 5xx, overload) and schema-invalid replies are retried with exponential backoff.
 
 ### Tech Stack
 
 | Layer | Technology |
 |:--|:--|
 | **Backend** | Python 3.12, FastAPI, Pydantic |
-| **Agent Orchestration** | Custom sequential pipeline with a critique → revision feedback loop |
+| **Agents** | [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk) (`claude-agent-sdk`) |
+| **Agent Orchestration** | Custom async pipeline with a critique → revision feedback loop |
 | **UI** | Streamlit |
-| **LLM** | Pluggable LLM provider via API |
+| **LLM** | Claude (default `claude-opus-5`) |
 
-### Proposed Project Structure
+### Project Structure
 
 ```
 postpilot-ai/
@@ -123,10 +129,13 @@ postpilot-ai/
 │   │   ├── main.py              # FastAPI entrypoint
 │   │   ├── api/                 # Route handlers
 │   │   ├── agents/
+│   │   │   ├── base.py          # ClaudeAgent: prompt, output schema, retries
+│   │   │   ├── state.py         # Shared pipeline state
 │   │   │   ├── research.py      # 🔎 Research Agent
 │   │   │   ├── draft.py         # ✍️ Draft Agent
 │   │   │   ├── critique.py      # 🧐 Critique Agent
 │   │   │   └── revision.py      # ✨ Revision Agent
+│   │   ├── llm.py               # Claude Agent SDK adapter
 │   │   ├── orchestrator.py      # Runs the pipeline
 │   │   ├── prompts/             # Prompt templates per agent
 │   │   └── schemas.py           # Pydantic request/response models
@@ -144,7 +153,9 @@ postpilot-ai/
 ### Prerequisites
 
 - Python **3.12+**
-- An API key for your LLM provider
+- An [Anthropic API key](https://platform.claude.com/settings/keys) for Claude
+
+The Claude Agent SDK ships with its own copy of the Claude Code CLI, so you don't need a separate Node.js or Claude Code install.
 
 ### 1. Clone the repo
 
@@ -160,8 +171,18 @@ python -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 
-cp .env.example .env             # add your LLM API key
+cp .env.example .env             # add your Anthropic API key (ANTHROPIC_API_KEY)
 ```
+
+Optional settings in `.env`:
+
+| Variable | Default | What it does |
+|:--|:--|:--|
+| `POSTPILOT_MODEL` | `claude-opus-5` | Claude model used by every agent |
+| `POSTPILOT_MAX_REVISIONS` | `3` | Most critique → revision passes per run |
+| `POSTPILOT_APPROVAL_SCORE` | `8` | Every critique score must reach this for the post to be approved |
+| `POSTPILOT_LLM_MAX_ATTEMPTS` | `3` | Attempts per agent call for transient errors or invalid output |
+| `POSTPILOT_GENERATION_TIMEOUT_SECONDS` | `300` | Wall-clock limit for one full run |
 
 ### 3. Start the backend
 
@@ -184,13 +205,27 @@ The app opens at **http://localhost:8501**. Enter a topic, pick an audience and 
 ### 5. Or call the API directly 🎉
 
 ```bash
-curl -X POST http://localhost:8000/api/generate \
-  -H "Content-Type: application/json" \
+API=http://localhost:8000
+
+# Create an account and log in
+curl -X POST $API/api/auth/register -H "Content-Type: application/json" \
+  -d '{"name": "Ada", "email": "ada@example.com", "password": "password123"}'
+TOKEN=$(curl -s -X POST $API/api/auth/login -H "Content-Type: application/json" \
+  -d '{"email": "ada@example.com", "password": "password123"}' \
+  | python -c 'import sys, json; print(json.load(sys.stdin)["access_token"])')
+
+# Save a post request (returns its id)
+curl -X POST $API/api/posts -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{
         "topic": "Why multi-agent systems beat single prompts",
         "audience": "software engineers",
-        "tone": "thought-leadership"
+        "tone": "thought-leadership",
+        "length": "medium"
       }'
+
+# Run the agents on it (takes a minute or two), then fetch the saved results
+curl -X POST $API/api/posts/1/generate -H "Authorization: Bearer $TOKEN"
+curl $API/api/posts/1/generations -H "Authorization: Bearer $TOKEN"
 ```
 
 ---
@@ -199,10 +234,10 @@ curl -X POST http://localhost:8000/api/generate \
 
 - [x] Accounts: sign up, log in, log out
 - [x] Post requests API (`/api/posts`) and Streamlit form for topic, audience, tone, and length, with post history
-- [ ] Research, Draft, Critique, and Revision agents
-- [ ] Sequential orchestrator with a critique → revision loop
-- [ ] FastAPI `/generate` endpoint
-- [ ] Streamlit UI: topic, audience, and tone inputs plus final output
+- [x] Research, Draft, Critique, and Revision agents, built on the Claude Agent SDK
+- [x] Sequential orchestrator with a critique → revision loop
+- [x] FastAPI generate endpoint (`/api/posts/{id}/generate`), with every run saved to SQLite
+- [x] Streamlit UI: topic, audience, and tone inputs plus final output
 
 ---
 

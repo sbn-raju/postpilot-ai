@@ -92,3 +92,49 @@ class PostResponse(BaseModel):
 class PostListResponse(BaseModel):
     items: list[PostResponse]
     total: int
+
+
+# ---------- Agent outputs ----------
+
+class ResearchBrief(BaseModel):
+    """Structured output of the Research Agent."""
+
+    summary: str = Field(description="Two or three sentences framing the topic for this audience.")
+    key_facts: list[str] = Field(description="Accurate, specific facts worth citing in the post.")
+    angles: list[str] = Field(description="Distinct angles or hooks the post could take.")
+    audience_insights: list[str] = Field(
+        description="What this audience cares about, already knows, or gets wrong."
+    )
+    pitfalls: list[str] = Field(
+        description="Claims to avoid or hedge because they are overstated, disputed, or dated."
+    )
+
+
+class Critique(BaseModel):
+    """Structured output of the Critique Agent. Scores run from 1 (poor) to 10 (excellent)."""
+
+    accuracy_score: int = Field(ge=1, le=10)
+    engagement_score: int = Field(ge=1, le=10)
+    audience_fit_score: int = Field(ge=1, le=10)
+    strengths: list[str] = Field(description="What already works and must be kept.")
+    issues: list[str] = Field(description="Concrete problems: wrong claims, weak hook, jargon, etc.")
+    suggestions: list[str] = Field(description="Specific, actionable edits for the next revision.")
+
+
+# ---------- Generations ----------
+
+class GenerationResponse(BaseModel):
+    """A row in the `generations` table."""
+
+    id: int
+    post_id: int
+    research_output: ResearchBrief
+    draft: str
+    critique: Critique
+    final_post: str
+    created_at: datetime
+
+
+class GenerationListResponse(BaseModel):
+    items: list[GenerationResponse]
+    total: int

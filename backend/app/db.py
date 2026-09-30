@@ -35,11 +35,26 @@ CREATE TABLE IF NOT EXISTS posts (
 );
 
 CREATE INDEX IF NOT EXISTS idx_posts_user_id_created_at ON posts(user_id, created_at);
+
+-- One row per successful agent pipeline run. research_output and critique hold JSON.
+CREATE TABLE IF NOT EXISTS generations (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    post_id         INTEGER NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+    research_output TEXT    NOT NULL,
+    draft           TEXT    NOT NULL,
+    critique        TEXT    NOT NULL,
+    final_post      TEXT    NOT NULL,
+    created_at      TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_generations_post_id_created_at ON generations(post_id, created_at);
 """
 
 
 def connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(config.DATABASE_PATH)
+    # Each connection serves one request, but FastAPI may create it in a worker thread
+    # and use it from the event loop (async routes), so the same-thread check is off.
+    conn = sqlite3.connect(config.DATABASE_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
@@ -49,6 +64,9 @@ def init_db() -> None:
     config.DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
     with connect() as conn:
         conn.executescript(SCHEMA)
+        # Generation runs in-process, so any post still "generating" at startup was
+        # interrupted by a restart and would otherwise stay locked forever.
+        conn.execute("UPDATE posts SET status = 'failed' WHERE status = 'generating'")
 
 
 def get_db() -> Iterator[sqlite3.Connection]:
